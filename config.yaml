@@ -1,0 +1,76 @@
+# config.example.yaml — parameters for Models A, B, C and the ensemble runner
+# ----------------------------------------------------------------------------
+# Copy to config.yaml and edit. Avoid storing secrets here; use env vars or key files.
+
+meta:
+  project: "crypto-momentum-mvp"
+  version: "0.1"
+  timezone: "UTC"           # all models run on 00:00 UTC bars
+  output_root: "model_ensemble/outputs"   # runner will create a timestamped subfolder
+  logs_root:   "model_ensemble/logs"
+
+barometer:
+  kind: "btc_eth_sol_333"    # one of: bitcoin|ethereum|solana|btc_eth_5050|btc_eth_sol_333
+
+# ------------------------------- Data / APIs -------------------------------
+data:
+  coingecko:
+    api_tier: "demo"         # demo | pro
+    api_key_file: "${COINGECKO_API_KEY_FILE:-./coingecko.key}"  # do not commit secrets
+    vs_currency: "usd"
+    days: 365                 # demo cap
+    interval: "daily"
+    precision: 5
+
+  kraken:
+    max_pairs: 120            # limit EUR pairs to consider (API economy)
+    include_inactive: false   # include non-online markets if Kraken returns status
+    dust_price_eur: 0.01      # exclude bases with median close < dust
+    since_days: 400           # OHLC history window requested
+    sleep_sec: 0.25           # polite delay between OHLC calls
+
+# ------------------------------- Model A -----------------------------------
+model_a:
+  lookbacks: [120, 180, 300]
+  skip_days: 7
+  dwell_days: 5
+  # no thresholds here; A derives sign from median z across lookbacks
+
+# ------------------------------- Model B -----------------------------------
+model_b:
+  N: 20
+  hysteresis:
+    enter_strong: 0.30
+    exit_strong: 0.25
+    enter_weak: 0.20
+    exit_weak: 0.25
+  dwell_days: 3
+
+# ------------------------------- Model C -----------------------------------
+model_c:
+  portfolio_notional_eur: 1000.0   # used only for the absolute € floor check
+  N_target: 10
+  N_min: 8
+  N_max: 12
+  entry_rank: 8
+  exit_rank: 15
+  weight_cap: 0.25
+  notional_floor_eur: 25.0
+
+  filters:
+    stable_keywords: ["usdt","usdc","dai","tusd","eusd","eurt","eurl","eurs","usde","fdusd","gusd","usdp","pax","pyusd","susd"]
+    leveraged_keywords: ["up","down","3l","3s","bull","bear","5l","5s","2l","2s"]
+    # optional activity filter: require at least k active days in last 30
+    min_active_days_last_30: 0
+
+# ------------------------------- Allocator ---------------------------------
+allocator:
+  exposure_scalars:
+    uptrend: 1.0
+    range:   0.25
+    downtrend: 0.0
+
+# ------------------------------- Runner ------------------------------------
+runner:
+  # The runner will write: A.csv, B.csv, C weights/diag, final_allocation.csv, summary.json
+  override_cli_with_yaml: true   # if true, YAML values take precedence unless CLI explicitly sets
