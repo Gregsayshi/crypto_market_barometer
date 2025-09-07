@@ -259,68 +259,63 @@ def run_strength_state_machine(er: pd.Series, cfg: ModelBConfig) -> pd.DataFrame
     out = pd.DataFrame(index=idx)
     out["er"] = er
 
-    state_series: List[str] = []
-    dwell_series: List[bool] = []
-    reason_series: List[str] = []
-
-    current_state = cfg.neutral
+    current = cfg.neutral
     dwell_left = 0
+
+    states, dwells, reasons = [], [], []
 
     for t, val in er.items():
         reason = ""
         if pd.isna(val):
-            # No update if ER missing — carry state forward without resetting dwell
-            state_series.append(current_state)
-            dwell_series.append(dwell_left > 0)
-            reason_series.append("missing ER; hold state")
+            states.append(current); dwells.append(dwell_left > 0); reasons.append("missing ER; hold")
             continue
 
         if dwell_left > 0:
-            next_state = current_state
-            reason = f"dwell({dwell_left})"
-            # Allow hard override into Strong/Weak when clear
-            if current_state != cfg.strong and val >= cfg.enter_strong:
+            # Hold unless hard override to Strong/Weak
+            next_state = current
+            if current != cfg.strong and val >= cfg.enter_strong:
                 next_state = cfg.strong
                 dwell_left = cfg.dwell_days
-                reason = f"Enter Strong: ER={val:.3f} >= {cfg.enter_strong:.2f} (override dwell)"
-            elif current_state != cfg.weak and val <= cfg.enter_weak:
+                reason = f"Enter Strong (override dwell): ER={val:.3f} ≥ {cfg.enter_strong:.2f}"
+            elif current != cfg.weak and val <= cfg.enter_weak:
                 next_state = cfg.weak
                 dwell_left = cfg.dwell_days
-                reason = f"Enter Weak: ER={val:.3f} <= {cfg.enter_weak:.2f} (override dwell)"
+                reason = f"Enter Weak (override dwell): ER={val:.3f} ≤ {cfg.enter_weak:.2f}"
             else:
                 dwell_left -= 1
+                reason = f"dwell({dwell_left})"
+            current = next_state
+
         else:
-            # Hysteresis around thresholds
-            if current_state == cfg.strong:
+            # Normal hysteresis
+            if current == cfg.strong:
                 if val <= cfg.exit_strong:
-                    current_state = cfg.neutral
+                    current = cfg.neutral
                     dwell_left = cfg.dwell_days
-                    reason = f"Exit Strong→Neutral: ER={val:.3f} <= {cfg.exit_strong:.2f}"
-            elif current_state == cfg.weak:
+                    reason = f"Exit Strong→Neutral: ER={val:.3f} ≤ {cfg.exit_strong:.2f}"
+            elif current == cfg.weak:
                 if val >= cfg.exit_weak:
-                    current_state = cfg.neutral
+                    current = cfg.neutral
                     dwell_left = cfg.dwell_days
-                    reason = f"Exit Weak→Neutral: ER={val:.3f} >= {cfg.exit_weak:.2f}"
+                    reason = f"Exit Weak→Neutral: ER={val:.3f} ≥ {cfg.exit_weak:.2f}"
             else:  # Neutral
                 if val >= cfg.enter_strong:
-                    current_state = cfg.strong
+                    current = cfg.strong
                     dwell_left = cfg.dwell_days
-                    reason = f"Enter Strong: ER={val:.3f} >= {cfg.enter_strong:.2f}"
+                    reason = f"Enter Strong: ER={val:.3f} ≥ {cfg.enter_strong:.2f}"
                 elif val <= cfg.enter_weak:
-                    current_state = cfg.weak
+                    current = cfg.weak
                     dwell_left = cfg.dwell_days
-                    reason = f"Enter Weak: ER={val:.3f} <= {cfg.enter_weak:.2f}"
-            next_state = current_state
+                    reason = f"Enter Weak: ER={val:.3f} ≤ {cfg.enter_weak:.2f}"
 
-        state_series.append(next_state)
-        dwell_series.append(dwell_left > 0)
-        reason_series.append(reason)
+        states.append(current)
+        dwells.append(dwell_left > 0)
+        reasons.append(reason or "hold")
 
-    out["strength_state"] = state_series
-    out["in_dwell"] = dwell_series
-    out["reason"] = reason_series
+    out["strength_state"] = states
+    out["in_dwell"] = dwells
+    out["reason"] = reasons
     return out
-
 
 # -----------------------------------------------------------------------------
 # Orchestrator & CLI

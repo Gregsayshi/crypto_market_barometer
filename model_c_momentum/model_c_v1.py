@@ -329,29 +329,99 @@ def compute_equal_weights(selected: List[str], pcfg: PortfolioConfig) -> Dict[st
     return {aid: w for aid in selected}
 
 
-def apply_caps_and_floors(weights: Dict[str,float], pcfg: PortfolioConfig) -> Dict[str,float]:
-    """Apply per-name cap and absolute EUR floor; drop below-floor positions, renormalize."""
+def apply_caps_and_floors(weights: Dict[str, float], pcfg: PortfolioConfig) -> Dict[str, float]:
     if not weights:
         return {}
-    # Cap
-    capped = {k: min(v, pcfg.weight_cap) for k, v in weights.items()}
-    # Renormalize after capping
-    s = sum(capped.values())
+
+    # Normalize positives to 1.0
+    raw = {k: max(0.0, float(v)) for k, v in weights.items()}
+    s = sum(raw.values())
     if s <= 0:
         return {}
-    capped = {k: v/s for k, v in capped.items()}
-    # Floor by notional (drop too small)
+    base = {k: v / s for k, v in raw.items()}
+
+    cap = float(pcfg.weight_cap)
+    # Initial clip
+    w = {k: min(v, cap) for k, v in base.items()}
+
+    # Water-fill: redistribute remaining mass without breaching cap
+    def total(wd): return sum(wd.values())
+    deficit = 1.0 - total(w)
+
+    # If impossible to reach sum=1 because cap*N < 1, we stop at the feasible sum.
+    feasible_sum = min(1.0, cap * len(w))
+    if feasible_sum < 1.0:
+        # Keep clipped allocation (sum == feasible_sum)
+        # Floors still apply below (may reduce further).
+        pass
+    else:
+        # Iteratively allocate deficit to names with headroom, proportional to base
+        while deficit > 1e-12:
+            headroom = {k: cap - w[k] for k in w if w[k] < cap - 1e-12}
+            if not headroom:
+                break
+            base_mass = sum(base[k] for k in headroom)
+            if base_mass <= 0:
+                break
+            changed = False
+            for k in list(headroom.keys()):
+                add = deficit * (base[k] / base_mass)
+                new_w = min(cap, w[k] + add)
+                if new_w > w[k] + 1e-15:
+                    changed = True
+                w[k] = new_w
+            new_deficit = 1.0 - total(w)
+            if not changed or abs(new_deficit - deficit) < 1e-12:
+                break
+            deficit = new_deficit
+
+    # Apply absolute EUR floor
     floor_w = pcfg.notional_floor_eur / max(pcfg.portfolio_notional_eur, 1e-9)
-    kept = {k: v for k, v in capped.items() if v >= floor_w}
-    # If everything dropped (edge), fall back to top-1 name 100%
+    kept = {k: v for k, v in w.items() if v >= floor_w}
+
     if not kept:
-        # pick the largest pre-cap weight
-        top = max(weights.items(), key=lambda kv: kv[1])[0]
-        kept = {top: 1.0}
-    # Renormalize
-    s2 = sum(kept.values())
-    final = {k: v/s2 for k, v in kept.items()}
-    return final
+        # Fallback: keep the largest within cap
+        k_top = max(w, key=w.get)
+        return {k_top: w[k_top]}
+
+    # Try a gentle renorm first (will often land exactly at target if no caps bind)
+    sum_kept = sum(kept.values())
+    target = min(1.0, cap * len(kept))
+    if sum_kept > 0 and sum_kept <= target + 1e-12:
+        scale = target / sum_kept
+        kept = {k: min(v * scale, cap) for k, v in kept.items()}
+
+    # If scaling hit a cap and left a deficit, do a post-floor water-fill to reach target
+    curr = sum(kept.values())
+    if curr + 1e-12 < target:
+        deficit = target - curr
+        while deficit > 1e-12:
+            headroom = {k: cap - kept[k] for k in kept if kept[k] < cap - 1e-12}
+            if not headroom:
+                break
+            # Prefer base-weighted redistribution; fall back to equal if base mass is zero
+            base_mass = sum(base.get(k, 0.0) for k in headroom)
+            changed = False
+            if base_mass > 0:
+                for k in list(headroom.keys()):
+                    add = deficit * (base.get(k, 0.0) / base_mass)
+                    inc = min(add, headroom[k])
+                    if inc > 1e-15:
+                        kept[k] += inc
+                        changed = True
+            else:
+                share = deficit / len(headroom)
+                for k in list(headroom.keys()):
+                    inc = min(share, headroom[k])
+                    if inc > 1e-15:
+                        kept[k] += inc
+                        changed = True
+            new_deficit = target - sum(kept.values())
+            if not changed or abs(new_deficit - deficit) < 1e-12:
+                break
+            deficit = new_deficit
+
+    return kept
 
 # -----------------------------------------------------------------------------
 # Orchestrator
