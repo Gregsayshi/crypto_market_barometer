@@ -8,24 +8,19 @@ This module implements **Model B** from the locked spec:
 - States: Strong / Neutral / Weak with hysteresis and a 3-day dwell
 - Outputs: continuous ER (R_t in [0,1]) and discrete strength_state
 
-Data source: CoinGecko "market_chart" endpoint (daily). Demo tier by default.
-Docs: https://docs.coingecko.com/v3.0.1/reference/coins-id-market-chart
-
-Design & Maintenance
---------------------
-- Parameters and thresholds live in `ModelBConfig`
-- HTTP client is isolated (`CoinGeckoClientB`) with a simple tier toggle (demo/pro) and a /ping health check
-- Barometer builder supports: bitcoin/btc, ethereum/eth, solana/sol, btc_eth_5050, btc_eth_sol_333 (equal-weight log-return indices)
-- CSV output is timestamped if `--out` is omitted for easy archiving
-
+Default data source: CoinGecko "market_chart" (daily). You can also pass a local long CSV
+(date, asset, close) via --price-csv and map coin_id->asset via --symbol-map.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import datetime, timezone
 import logging
 import time
+import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -37,7 +32,7 @@ from urllib3.util import Retry
 # Versioning & constants
 # -----------------------------------------------------------------------------
 MODEL_B_VERSION = "ModelB-v1.0"
-USER_AGENT = "ModelB/1.0 (+https://tether.to)"
+USER_AGENT = "ModelB/1.0"
 
 COIN_IDS = {
     "bitcoin": "bitcoin",
@@ -56,7 +51,7 @@ class FetchConfig:
               'pro'  uses pro-api.coingecko.com with header x-cg-pro-api-key.
     """
     vs_currency: str = "usd"
-    days: int = 365  
+    days: int = 365
     interval: str = "daily"
     precision: int = 5
     timeout_sec: float = 20.0
@@ -100,9 +95,6 @@ def load_api_key(flag_key: Optional[str] = None, file_path: Optional[str] = None
     Order: explicit flag → explicit file → ./coingecko.key → env var COINGECKO_API_KEY.
     Never prints the secret; logs sources at DEBUG.
     """
-    import os
-    from pathlib import Path
-
     if flag_key and flag_key.strip():
         return flag_key.strip()
 
@@ -184,63 +176,91 @@ class CoinGeckoClientB:
         return daily
 
 
-def build_barometer(client: CoinGeckoClientB, kind: str = "bitcoin") -> pd.Series:
-    """Return a normalized daily barometer price series.
+# -----------------------------------------------------------------------------
+# Local CSV client (Binance/Kraken long-format -> Series)
+# -----------------------------------------------------------------------------
+@dataclass
+class LocalCSVSourceConfig:
+    csv_path: str                          # path to long CSV: date,asset,close
+    symbol_map: Dict[str, str]             # coin_id -> CSV asset symbol (e.g., 'bitcoin'->'XBTEUR')
 
-    kind options (case-insensitive):
-      - 'bitcoin' / 'btc'
-      - 'ethereum' / 'eth'
-      - 'solana' / 'sol'
-      - 'btc_eth_5050' -> equal-weight BTC+ETH index
-      - 'btc_eth_sol_333' (alias: 'btc_eth_sol', 'btc_eth_sol_ew') -> equal-weight BTC+ETH+SOL index
+class LocalCSVClient:
     """
+    Minimal drop-in replacement for CoinGeckoClientB.
+    Expects CSV columns: date, asset, close (as produced by data/fetch_market_data.py).
+    """
+
+    def __init__(self, cfg: LocalCSVSourceConfig):
+        self.cfg = cfg
+        self._df: Optional[pd.DataFrame] = None
+
+    def _load(self) -> pd.DataFrame:
+        if self._df is None:
+            df = pd.read_csv(self.cfg.csv_path)
+            cols = {c.lower(): c for c in df.columns}
+            for c in ("date", "asset", "close"):
+                if c not in cols:
+                    raise ValueError(f"Local CSV must have columns date, asset, close (missing '{c}')")
+            df = df[[cols["date"], cols["asset"], cols["close"]]].copy()
+            df.columns = ["date", "asset", "close"]
+            df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce").dt.tz_convert(None).dt.normalize()
+            df["asset"] = df["asset"].astype(str)
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            df = df.dropna(subset=["date", "asset", "close"])
+            self._df = df.sort_values(["asset", "date"]).drop_duplicates(subset=["date", "asset"], keep="last")
+        return self._df
+
+    def get_market_chart(self, coin_id: str) -> pd.Series:
+        sym = self.cfg.symbol_map.get(str(coin_id).lower())
+        if not sym:
+            raise KeyError(f"LocalCSVClient: no mapping for coin_id '{coin_id}'. Provide --symbol-map.")
+        df = self._load()
+        sub = df[df["asset"] == sym]
+        if sub.empty:
+            raise ValueError(f"LocalCSVClient: no rows for asset '{sym}' in {self.cfg.csv_path}")
+        s = sub.set_index("date")["close"].sort_index().asfreq("D").ffill()
+        s.name = sym
+        return s
+
+
+# -----------------------------------------------------------------------------
+# Barometer construction (duck-typed client)
+# -----------------------------------------------------------------------------
+def build_barometer(client, kind: str = "bitcoin") -> pd.Series:
+    """Return a normalized daily barometer price series."""
     k = kind.lower().strip()
     if k in ("bitcoin", "btc"):
-        s = client.get_market_chart(COIN_IDS["bitcoin"]).rename("BTC")
-        out = s
+        out = client.get_market_chart(COIN_IDS["bitcoin"]).rename("BTC")
     elif k in ("ethereum", "eth"):
-        s = client.get_market_chart(COIN_IDS["ethereum"]).rename("ETH")
-        out = s
+        out = client.get_market_chart(COIN_IDS["ethereum"]).rename("ETH")
     elif k in ("solana", "sol"):
-        s = client.get_market_chart(COIN_IDS["solana"]).rename("SOL")
-        out = s
+        out = client.get_market_chart(COIN_IDS["solana"]).rename("SOL")
     elif k == "btc_eth_5050":
-        btc = client.get_market_chart(COIN_IDS["bitcoin"]).rename("BTC")
-        time.sleep(0.2)
+        btc = client.get_market_chart(COIN_IDS["bitcoin"]).rename("BTC"); time.sleep(0.2)
         eth = client.get_market_chart(COIN_IDS["ethereum"]).rename("ETH")
         df = pd.concat([btc, eth], axis=1).dropna()
-        logret = np.log(df).diff()
-        comb = logret.mean(axis=1)
-        out = 100.0 * np.exp(comb.cumsum())
-        out.name = "BTC_ETH_50_50"
+        comb = np.log(df).diff().mean(axis=1)
+        out = 100.0 * np.exp(comb.cumsum()); out.name = "BTC_ETH_50_50"
     elif k in ("btc_eth_sol_333", "btc_eth_sol", "btc_eth_sol_ew"):
-        btc = client.get_market_chart(COIN_IDS["bitcoin"]).rename("BTC")
-        time.sleep(0.2)
-        eth = client.get_market_chart(COIN_IDS["ethereum"]).rename("ETH")
-        time.sleep(0.2)
+        btc = client.get_market_chart(COIN_IDS["bitcoin"]).rename("BTC"); time.sleep(0.2)
+        eth = client.get_market_chart(COIN_IDS["ethereum"]).rename("ETH"); time.sleep(0.2)
         sol = client.get_market_chart(COIN_IDS["solana"]).rename("SOL")
         df = pd.concat([btc, eth, sol], axis=1).dropna()
-        logret = np.log(df).diff()
-        comb = logret.mean(axis=1)
-        out = 100.0 * np.exp(comb.cumsum())
-        out.name = "BTC_ETH_SOL_EQ"
+        comb = np.log(df).diff().mean(axis=1)
+        out = 100.0 * np.exp(comb.cumsum()); out.name = "BTC_ETH_SOL_EQ"
     else:
         raise ValueError("Unknown barometer kind. Use 'bitcoin'|'ethereum'|'solana'|'btc_eth_5050'|'btc_eth_sol_333'.")
 
-    out = out[~out.index.duplicated(keep="last")].sort_index()
-    out = out.asfreq("D").ffill()
+    out = out[~out.index.duplicated(keep="last")].sort_index().asfreq("D").ffill()
     return out
 
 
 # -----------------------------------------------------------------------------
 # Signal computation — Efficiency Ratio (ER)
 # -----------------------------------------------------------------------------
-
 def compute_er(series: pd.Series, N: int) -> pd.Series:
-    """Compute Efficiency Ratio on log price.
-
-    ER_N(t) = |log P_t - log P_{t-N}| / sum_{i=1..N} |log P_{t-i} - log P_{t-i-1}|
-    """
+    """Compute Efficiency Ratio on log price:
+       ER_N(t) = |log P_t - log P_{t-N}| / sum_{i=1..N} |log P_{t-i} - log P_{t-i-1}|"""
     s = series.dropna().astype(float)
     logp = np.log(s)
     num = (logp - logp.shift(N)).abs()
@@ -253,7 +273,6 @@ def compute_er(series: pd.Series, N: int) -> pd.Series:
 # -----------------------------------------------------------------------------
 # State machine — Strong / Neutral / Weak with hysteresis & dwell
 # -----------------------------------------------------------------------------
-
 def run_strength_state_machine(er: pd.Series, cfg: ModelBConfig) -> pd.DataFrame:
     idx = er.index
     out = pd.DataFrame(index=idx)
@@ -264,48 +283,38 @@ def run_strength_state_machine(er: pd.Series, cfg: ModelBConfig) -> pd.DataFrame
 
     states, dwells, reasons = [], [], []
 
-    for t, val in er.items():
+    for _, val in er.items():
         reason = ""
         if pd.isna(val):
             states.append(current); dwells.append(dwell_left > 0); reasons.append("missing ER; hold")
             continue
 
         if dwell_left > 0:
-            # Hold unless hard override to Strong/Weak
             next_state = current
             if current != cfg.strong and val >= cfg.enter_strong:
-                next_state = cfg.strong
-                dwell_left = cfg.dwell_days
+                next_state = cfg.strong; dwell_left = cfg.dwell_days
                 reason = f"Enter Strong (override dwell): ER={val:.3f} ≥ {cfg.enter_strong:.2f}"
             elif current != cfg.weak and val <= cfg.enter_weak:
-                next_state = cfg.weak
-                dwell_left = cfg.dwell_days
+                next_state = cfg.weak; dwell_left = cfg.dwell_days
                 reason = f"Enter Weak (override dwell): ER={val:.3f} ≤ {cfg.enter_weak:.2f}"
             else:
-                dwell_left -= 1
-                reason = f"dwell({dwell_left})"
+                dwell_left -= 1; reason = f"dwell({dwell_left})"
             current = next_state
-
         else:
-            # Normal hysteresis
             if current == cfg.strong:
                 if val <= cfg.exit_strong:
-                    current = cfg.neutral
-                    dwell_left = cfg.dwell_days
+                    current = cfg.neutral; dwell_left = cfg.dwell_days
                     reason = f"Exit Strong→Neutral: ER={val:.3f} ≤ {cfg.exit_strong:.2f}"
             elif current == cfg.weak:
                 if val >= cfg.exit_weak:
-                    current = cfg.neutral
-                    dwell_left = cfg.dwell_days
+                    current = cfg.neutral; dwell_left = cfg.dwell_days
                     reason = f"Exit Weak→Neutral: ER={val:.3f} ≥ {cfg.exit_weak:.2f}"
-            else:  # Neutral
+            else:
                 if val >= cfg.enter_strong:
-                    current = cfg.strong
-                    dwell_left = cfg.dwell_days
+                    current = cfg.strong; dwell_left = cfg.dwell_days
                     reason = f"Enter Strong: ER={val:.3f} ≥ {cfg.enter_strong:.2f}"
                 elif val <= cfg.enter_weak:
-                    current = cfg.weak
-                    dwell_left = cfg.dwell_days
+                    current = cfg.weak; dwell_left = cfg.dwell_days
                     reason = f"Enter Weak: ER={val:.3f} ≤ {cfg.enter_weak:.2f}"
 
         states.append(current)
@@ -317,8 +326,9 @@ def run_strength_state_machine(er: pd.Series, cfg: ModelBConfig) -> pd.DataFrame
     out["reason"] = reasons
     return out
 
+
 # -----------------------------------------------------------------------------
-# Orchestrator & CLI
+# Orchestrator & helpers
 # -----------------------------------------------------------------------------
 @dataclass
 class ModelBResult:
@@ -333,19 +343,39 @@ class ModelBResult:
         self.data.to_csv(path, index_label="date")
 
 
+def parse_symbol_map_arg(arg: Optional[str]) -> Dict[str, str]:
+    """Parse 'bitcoin:XBTEUR,ethereum:ETHEUR,solana:SOLEUR' into a dict (lowercased keys)."""
+    if not arg:
+        return {}
+    out: Dict[str, str] = {}
+    for tok in arg.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        k, v = tok.split(":", 1)
+        out[k.strip().lower()] = v.strip()
+    return out
+
+
 def run_model_b(
     api_key: Optional[str] = None,
     barometer_kind: str = "bitcoin",
     fetch_cfg: Optional[FetchConfig] = None,
     model_cfg: Optional[ModelBConfig] = None,
+    client: Optional[object] = None,   # LocalCSVClient or None (CoinGecko)
 ) -> ModelBResult:
     logging.info("Running Model B — %s", MODEL_B_VERSION)
     fetch_cfg = fetch_cfg or FetchConfig()
     model_cfg = model_cfg or ModelBConfig()
 
-    client = CoinGeckoClientB(api_key=api_key, cfg=fetch_cfg)
-    # Health check
-    client.ping()
+    # Choose client; ping only when using CoinGecko
+    if client is None:
+        cg = CoinGeckoClientB(api_key=api_key, cfg=fetch_cfg)
+        try:
+            cg.ping()
+        except Exception as e:
+            logging.warning("CoinGecko ping failed (continuing): %s", e)
+        client = cg
 
     series = build_barometer(client, kind=barometer_kind)
     if len(series) < model_cfg.min_history_days:
@@ -358,12 +388,28 @@ def run_model_b(
     return result
 
 
+# -----------------------------------------------------------------------------
+# CLI
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="ModelB-v1.0 — Trend Strength via ER")
+
+    # CoinGecko options (still supported)
     parser.add_argument("--api-key", type=str, default=None, help="CoinGecko API key (optional)")
     parser.add_argument("--api-key-file", type=str, default=None, help="Path to a .key file with ONLY the API key (default: ./coingecko.key)")
+    parser.add_argument("--api-tier", type=str, default="demo", choices=["demo","pro"], help="API tier: 'demo' public or 'pro' paid")
+    parser.add_argument("--days", type=int, default=365, help="CoinGecko days (demo cap 365; Pro can use 540+)")
+    parser.add_argument("--vs", type=str, default="usd", help="CoinGecko quote currency")
+
+    # Local CSV options
+    parser.add_argument("--price-csv", type=str, default=None,
+                        help="Path to local long-format CSV (date,asset,close) to avoid API caps.")
+    parser.add_argument("--symbol-map", type=str, default=None,
+                        help="Mapping for local CSV (coin_id -> asset), e.g. 'bitcoin:XBTEUR,ethereum:ETHEUR,solana:SOLEUR' or USDT symbols.")
+
+    # Barometer / output
     parser.add_argument(
         "--barometer-kind",
         type=str,
@@ -371,28 +417,51 @@ if __name__ == "__main__":
         choices=["bitcoin","btc","ethereum","eth","solana","sol","btc_eth_5050","btc_eth_sol_333","btc_eth_sol","btc_eth_sol_ew"],
         help="Barometer: 'bitcoin'|'ethereum'|'solana'|'btc_eth_5050'|'btc_eth_sol_333'",
     )
-    parser.add_argument("--days", type=int, default=365, help="Days to request from API (demo cap 365; Pro can use 540+)")
-    parser.add_argument("--api-tier", type=str, default="demo", choices=["demo","pro"], help="API tier: 'demo' public or 'pro' paid")
-    parser.add_argument("--vs", type=str, default="usd", help="Quote currency (default: usd)")
     parser.add_argument("--out", type=str, default=None, help="Output CSV path. If omitted, a timestamped filename is used.")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"], help="Logging verbosity")
 
     args = parser.parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper()), format="%(asctime)s %(levelname)s %(message)s")
 
+    # Choose client
+    client = None
+    if args.price_csv:
+        smap = parse_symbol_map_arg(args.symbol_map)
+        if not smap:
+            # try to infer mapping from the CSV
+            _peek = pd.read_csv(args.price_csv, nrows=200)
+            acols = {c.lower(): c for c in _peek.columns}
+            if "asset" not in acols:
+                raise SystemExit("Local CSV must have an 'asset' column.")
+            assets = set(_peek[acols["asset"]].astype(str).unique())
+            if "BTCUSDT" in assets:
+                smap = {"bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT"}
+            elif "XBTEUR" in assets or "BTCEUR" in assets:
+                btc = "XBTEUR" if "XBTEUR" in assets else "BTCEUR"
+                smap = {"bitcoin": btc, "ethereum": "ETHEUR", "solana": "SOLEUR"}
+            else:
+                raise SystemExit("Please provide --symbol-map for the local CSV (could not infer).")
+        client = LocalCSVClient(LocalCSVSourceConfig(csv_path=args.price_csv, symbol_map=smap))
+
     fetch_cfg = FetchConfig(vs_currency=args.vs, days=args.days, api_tier=args.api_tier)
     api_key = load_api_key(args.api_key, args.api_key_file)
-    if api_key is None:
-        logging.warning("No API key found via flag, file, or env; proceeding unauthenticated (rate limits may be lower)")
+    if api_key is None and not client:
+        logging.warning("No CoinGecko API key and no --price-csv provided; proceeding unauthenticated CoinGecko (rate limits apply).")
 
     try:
-        res = run_model_b(api_key=api_key, barometer_kind=args.barometer_kind, fetch_cfg=fetch_cfg, model_cfg=ModelBConfig())
+        res = run_model_b(
+            api_key=api_key,
+            barometer_kind=args.barometer_kind,
+            fetch_cfg=fetch_cfg,
+            model_cfg=ModelBConfig(),
+            client=client,
+        )
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
-        default_name = f"modelB_output_{args.barometer_kind}_{ts}.csv"
-        out_path = args.out or default_name
+        out_path = args.out or f"modelB_output_{args.barometer_kind}_{ts}.csv"
         res.save_csv(out_path)
         last = res.latest_row()
-        logging.info("Latest: date=%s ER=%.3f state=%s dwell=%s", last.name.date(), last["er"], last["strength_state"], last["in_dwell"])
+        logging.info("Latest: date=%s ER=%.3f state=%s dwell=%s",
+                     last.name.date(), last["er"], last["strength_state"], last["in_dwell"])
         print(f"Saved daily log to {out_path} — version {res.version}")
     except Exception as e:
         logging.exception("Model B failed: %s", e)
