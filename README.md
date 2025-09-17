@@ -119,23 +119,78 @@ python model_ensemble/run_ensemble.py   --config config.yaml   --barometer-kind 
 
 ---
 
-## Validation & Backtesting (minimal)
+The `validation/` folder now supports **timestamped, reproducible backtests** using a single wrapper.
 
-A light “drop‑in” backtester lives in `validation/`. It consumes:
-- **Exposures**: CSV (`date,exposure_scalar,regime`) or `run_summary_*.json`
-- **Weights**: CSV (`date,asset,weight`) — daily or rebalance rows
-- **Prices**: long CSV (`date,asset,close`) — daily EUR
+### One-shot validation run
+Use `validation/run_validation.py` to build exposures & weights history **and** immediately run the backtest:
 
-**Example**
 ```bash
-# Build prices from latest ensemble’s selected assets (+ optional baselines)
-python validation/build_prices_kraken.py   --from-ensemble-latest --since-days 400   --asset-col pair_key --include XBTEUR   --out data/prices_eur.csv
-
-# Backtest strategy vs baselines
-python validation/run_backtest.py   --from-ensemble-latest   --prices data/prices_eur.csv   --bench XBTEUR --bench ETHEUR
+python validation/run_validation.py \
+  --use-latest-outputs \
+  --kraken-price-csv data/kraken/kraken_eur_universe.csv \
+  --prices data/prices_eur.csv \
+  --bench XBTEUR --bench ETHEUR \
+  --start 2024-09-17 --end 2025-09-16 \
+  --rebalance W-MON --N 10 --cap 0.25 --floor-eur 25 --portfolio-eur 1000 \
+  --signal-lag 1 --tc-bps 10 \
+  --run-tag barometer_v1
 ```
 
-Outputs: `metrics_summary.csv` and charts (equity, drawdowns, rolling vol/sharpe, monthly heatmap, regime ribbon, turnover, weights stack).
+**What it does:**
+1. Picks the latest `model_ensemble/outputs/<timestamp>/` folder (or use `--model-a-csv` / `--model-b-csv` to override)
+2. Builds:
+   - `exposures.csv` (daily regime + exposure scalar)
+   - `weights_history.csv` (walk-forward Model C weights)
+3. Runs `validation/run_backtest.py` with those inputs
+4. Writes results to:
+   - Inputs: `validation/inputs/YYYYMMDD_HHMMSS(_<tag>)/`
+   - Results: `validation/runs/YYYYMMDD_HHMMSS(_<tag>)/`
+
+You can re-run many times — timestamped folders avoid overwriting old results.
+
+### YAML-first workflow
+Instead of CLI flags, store parameters in `validation_config.yaml`:
+
+```yaml
+builder:
+  use_latest_outputs: true
+  outputs_root: model_ensemble/outputs
+  kraken_price_csv: data/kraken/kraken_eur_universe.csv
+  rebalance: W-MON
+  N: 10
+  cap: 0.25
+  floor_eur: 25
+  portfolio_eur: 1000
+  exp_uptrend: 1.0
+  exp_range: 0.25
+  exp_downtrend: 0.0
+  start: 2024-09-17
+  end: 2025-09-16
+
+backtester:
+  prices: data/prices_eur.csv
+  benches: [XBTEUR, ETHEUR]
+  signal_lag: 1
+  tc_bps: 10
+  run_tag: barometer_v1
+
+paths:
+  builder_path: validation/build_validation_inputs.py
+  backtest_path: validation/run_backtest.py
+```
+
+Run with:
+```bash
+python validation/run_validation_from_yaml.py --config validation_config.yaml
+```
+
+This produces the same timestamped results and is ideal for reproducible runs in CI/CD or notebooks.
+
+### Outputs
+- **metrics_summary.csv** – CAGR, vol, Sharpe, max DD, turnover
+- **Charts** – equity curve, drawdowns, rolling Sharpe/vol, monthly heatmap, regime ribbon, weights stack
+
+You can now safely compare multiple runs side-by-side by browsing `validation/runs/` and diffing the `metrics_summary.csv` files.
 
 ---
 
