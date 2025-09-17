@@ -1,0 +1,50 @@
+# validation_config.yaml — template
+# Store everything needed to build inputs and run the backtest.
+#
+# Edit values, then run:
+#   python run_validation_from_yaml.py --config validation_config.yaml
+#
+builder:
+  use_latest_outputs: true        # if true, pick latest folder under outputs_root for A/B CSVs
+  outputs_root: model_ensemble/outputs
+  a_pattern: modelA_output*.csv
+  b_pattern: modelB_output*.csv
+
+  # If you prefer explicit CSVs, set use_latest_outputs: false and fill these:
+  model_a_csv: null               # e.g., model_ensemble/outputs/20250903_181530Z/modelA_output_....csv
+  model_b_csv: null               # e.g., model_ensemble/outputs/20250903_181530Z/modelB_output_....csv
+
+  # Model C (weights replay) inputs
+  kraken_price_csv: data/kraken/kraken_eur_universe.csv
+  rebalance: W-MON
+  N: 10
+  cap: 0.25
+  floor_eur: 25
+  portfolio_eur: 1000
+  skip_days: 7
+
+  # Exposure scalars (A+B → Regime → scalar)
+  exp_uptrend: 1.0
+  exp_range: 0.25
+  exp_downtrend: 0.0
+
+  # Window
+  start: 2024-09-17
+  end: 2025-09-16
+
+  # Outputs
+  outdir: validation/inputs
+
+backtester:
+  prices: data/prices_eur.csv
+  benches: [XBTEUR, ETHEUR]
+  signal_lag: 1
+  tc_bps: 10
+  # Optional: either set outdir directly, or provide run_tag and we'll map to validation/runs/<run_tag>
+  outdir: validation/runs/barometer_v1
+  run_tag: barometer_v1
+
+paths:
+  python: python
+  builder_path: validation/build_validation_inputs.py
+  backtest_path: validation/run_backtest.py

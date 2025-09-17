@@ -26,7 +26,7 @@ data:
     max_pairs: 120            # limit EUR pairs to consider (API economy)
     include_inactive: false   # include non-online markets if Kraken returns status
     dust_price_eur: 0.01      # exclude bases with median close < dust
-    since_days: 400           # OHLC history window requested
+    since_days: 800           # OHLC history window requested
     sleep_sec: 0.25           # polite delay between OHLC calls
 
 # ------------------------------- Model A -----------------------------------
