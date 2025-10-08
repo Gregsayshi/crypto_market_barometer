@@ -5,8 +5,8 @@ meta:
 data:
   # Long-format CSVs: date,asset,close (daily)
   barometer_prices: data/kraken/kraken_daily.csv   # can reuse the same CSV
-  universe_prices:  data/kraken/kraken_eur_universe.csv
-  prices_wide:      data/prices_eur.csv       # wide panel used by the backtester (date,asset,close)
+  universe_prices:  data/universe_subset/universe_v7/universe_filtered.csv
+  prices_wide:      data/universe_subset/universe_v7/universe_filtered.csv      # wide panel used by the backtester (date,asset,close)
   benchmarks: [XBTEUR, ETHEUR]
 
   # Map coin_id -> asset in your CSV
@@ -17,7 +17,7 @@ data:
     solana:   SOLEUR
 
 model_a:
-  barometer_kind: btc_eth_sol_333
+  barometer_kind: btc
   lookbacks: [120, 180, 300]
   skip_days: 7
   enter_up_z:   0.25
@@ -37,7 +37,7 @@ model_b:
 
 model_c:
   rebalance: 4W-SUN
-  N: 15
+  N: 10
   cap: 0.25
   floor_eur: 250
   portfolio_eur: 10000
