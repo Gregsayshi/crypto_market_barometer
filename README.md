@@ -70,11 +70,7 @@ Operates only on pre-filtered liquid pairs. Modes supported:
 
 ## 🧮 Universe Building
 
-Build tradable assets by **liquidity and data-quality filters**:
-
-```bash
-python data/build_tradeable_universe.py   --in data/kraken/kraken_eur_universe.csv   --out-dir data/universe_subset/universe_v1   --window-days 365   --min-age-days 1   --min-coverage 0.95   --min-adv30-eur 200000   --min-nonzero-vol 0.90   --max-close-vwap-dev 0.05   --max-zero-return 0.20   --vol-min 1 --vol-max 10   --whitelist XBTEUR ETHEUR SOLEUR   --exclude-pattern "^ZUSD|^USDT|.*3L$|.*3S$|^W[A-Z]+EUR"
-```
+Build tradable assets by **liquidity and data-quality filters**
 
 **Outputs**
 
@@ -101,68 +97,6 @@ validation/inputs/<run_tag>_<UTC_TS>/
 validation/runs/<run_tag>_<UTC_TS>/
 ```
 
-### Example `config.yaml`
-
-```yaml
-meta:
-  run_tag: prod_like
-  timezone: UTC
-
-data:
-  barometer_prices: data/kraken/kraken_daily.csv
-  universe_prices:  data/universe_subset/universe_v7/universe_filtered.csv
-  prices_wide:      data/universe_subset/universe_v7/universe_filtered.csv
-  benchmarks: [XBTEUR, ETHEUR]
-
-  symbol_map:
-    bitcoin:  XBTEUR
-    ethereum: ETHEUR
-    solana:   SOLEUR
-
-model_a:
-  barometer_kind: btc
-  lookbacks: [120, 180, 300]
-  skip_days: 7
-  enter_up_z: 0.25
-  exit_up_z: 0.10
-  enter_down_z: -0.25
-  exit_down_z: -0.10
-  dwell_days: 5
-
-model_b:
-  barometer_kind: btc_eth_sol_333
-  er_window: 20
-  enter_strong: 0.30
-  exit_strong: 0.25
-  enter_weak: 0.20
-  exit_weak: 0.25
-  dwell_days: 3
-
-model_c:
-  mode: equal_weight
-  rebalance: 4W-SUN
-  N: 10
-  cap: 0.25
-  floor_eur: 250
-  portfolio_eur: 10000
-  skip_days: 3
-
-allocator:
-  blend: { w_A: 0.5, w_B: 0.5 }
-  exp_caps: { uptrend: 1.0, range: 1.0, downtrend: 0.0 }
-
-backtest:
-  start: "2024-09-19"
-  end:   "2025-09-19"
-  signal_lag: 1
-  tc_bps: 10
-  outdir_root: validation/runs
-
-outputs:
-  write_inputs: true
-  inputs_outdir_root: validation/inputs
-```
-
 ### Results
 
 **Produced files**
@@ -170,6 +104,8 @@ outputs:
 - `metrics_summary.csv` – CAGR, vol, Sharpe, max DD, turnover  
 - `equity_curves.png`, `drawdowns.png`, `rolling_sharpe.png`, `rolling_vol.png`,  
 - `weights_stack.png`, `regime_ribbon.png`, `turnover.png`  
+
+Each timestamped directory contains all artifacts required for audit or comparison.
 
 ---
 
@@ -188,6 +124,21 @@ outputs:
 python data/fetch_market_data.py kraken   --symbols XBTEUR ETHEUR SOLEUR   --since 2022-01-01   --out data/kraken/kraken_daily.csv
 ```
 
+---
+
+## 🧪 Development & Testing
+
+- Python **3.10+**  
+- Install dependencies:
+  ```bash
+  pip install -r requirements.txt
+  ```
+- Run tests:
+  ```bash
+  pytest -q
+  ```
+
+---
 
 ## 🧭 Repository Layout
 
@@ -202,3 +153,14 @@ crypto_market_barometer/
 └── universe_subset/          # Point-in-time filtered universes
 ```
 
+---
+
+## ✅ Key Features
+
+- **Offline reproducibility** – no API required  
+- **Timestamped outputs** – never overwrite old results  
+- **Separation of concerns** – exposure timing vs asset allocation  
+- **Liquidity awareness** – universe filtered by ADV and stability  
+- **Full audit trail** – every parameter, metric, and chart stored per run  
+
+---
